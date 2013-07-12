@@ -307,6 +307,7 @@ source $TOP_DIR/lib/cinder
 source $TOP_DIR/lib/swift
 source $TOP_DIR/lib/ceilometer
 source $TOP_DIR/lib/heat
+source $TOP_DIR/lib/designate
 source $TOP_DIR/lib/neutron
 source $TOP_DIR/lib/baremetal
 source $TOP_DIR/lib/ldap
@@ -746,6 +747,11 @@ if is_service_enabled heat; then
     configure_heatclient
 fi
 
+if is_service_enabled designate; then
+    install_designateclient
+    install_designate
+fi
+
 if is_service_enabled tls-proxy; then
     configure_CA
     init_CA
@@ -880,6 +886,7 @@ if is_service_enabled key; then
     create_nova_accounts
     create_cinder_accounts
     create_neutron_accounts
+    create_designate_accounts
 
     # ``keystone_data.sh`` creates services, admin and demo users, and roles.
     ADMIN_PASSWORD=$ADMIN_PASSWORD SERVICE_TENANT_NAME=$SERVICE_TENANT_NAME SERVICE_PASSWORD=$SERVICE_PASSWORD \
@@ -1220,6 +1227,16 @@ if is_service_enabled heat; then
     init_heat
     echo_summary "Starting Heat"
     start_heat
+fi
+
+if is_service_enabled designate; then
+    echo_summary "Configuring Designate"
+    configure_designate
+    configure_designateclient
+    echo_summary "Starting Designate"
+    init_designate
+    start_designate
+    create_designate_initial_resources
 fi
 
 
