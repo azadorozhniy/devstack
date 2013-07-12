@@ -21,7 +21,7 @@ set +o xtrace
 # Defaults
 # --------
 
-# Set up default directories
+# Set up default paths
 DESIGNATE_DIR=$DEST/designate
 DESIGNATECLIENT_DIR=$DEST/python-designateclient
 DESIGNATE_CONF_DIR=/etc/designate
@@ -30,6 +30,9 @@ DESIGNATE_CONF=$DESIGNATE_CONF_DIR/designate.conf
 DESIGNATE_API_PASTE_CONF=$DESIGNATE_CONF_DIR/api-paste.ini
 DESIGNATE_LOG_DIR=/var/log/designate
 DESIGNATE_AUTH_CACHE_DIR=${DESIGNATE_AUTH_CACHE_DIR:-/var/cache/designate}
+
+# Set up default options
+DESIGNATE_BACKEND_DRIVER=${DESIGNATE_BACKEND_DRIVER:=fake}
 
 # Support potential entry-points console scripts
 if [[ -d $DESIGNATE_DIR/bin ]]; then
@@ -71,6 +74,13 @@ function configure_designate() {
 
     if is_service_enabled key; then
         iniset $DESIGNATE_CONF service:api auth_strategy keystone
+    fi
+
+    if is_service_enabled designate-agent; then
+        iniset $DESIGNATE_CONF service:central backend_driver rpc
+        iniset $DESIGNATE_CONF service:agent backend_driver $DESIGNATE_BACKEND_DRIVER
+    else
+        iniset $DESIGNATE_CONF service:central backend_driver $DESIGNATE_BACKEND_DRIVER
     fi
 
     # Install the policy file for the API server
