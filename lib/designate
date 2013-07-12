@@ -72,6 +72,10 @@ function configure_designate() {
     iniset $DESIGNATE_CONF DEFAULT verbose True
     iniset $DESIGNATE_CONF storage:sqlalchemy database_connection `database_connection_url designate`
 
+    if [[ "$DESIGNATE_BACKEND_DRIVER" = 'powerdns' ]]; then
+        iniset $DESIGNATE_CONF backend:powerdns database_connection `database_connection_url designate_pdns`
+    fi
+
     if is_service_enabled key; then
         iniset $DESIGNATE_CONF service:api auth_strategy keystone
     fi
@@ -155,13 +159,26 @@ function init_designate() {
     recreate_database designate utf8
 
     # Init and migrate designate database
-    $GLANCE_BIN_DIR/designate-manage database-init
-    $GLANCE_BIN_DIR/designate-manage database-sync
+    $DESIGNATE_BIN_DIR/designate-manage database-init
+    $DESIGNATE_BIN_DIR/designate-manage database-sync
+
+    if [[ "$DESIGNATE_BACKEND_DRIVER" = 'powerdns' ]]; then
+        # (Re)create designate_pdns database
+        recreate_database designate_pdns utf8
+
+        # Init and migrate designate_pdns database
+        $DESIGNATE_BIN_DIR/designate-manage powerdns database-init
+        $DESIGNATE_BIN_DIR/designate-manage powerdns database-sync
+    fi
 }
 
 # install_designate() - Collect source and prepare
 function install_designate() {
     git_clone $DESIGNATE_REPO $DESIGNATE_DIR $DESIGNATE_BRANCH
+
+    if [[ "$DESIGNATE_BACKEND_DRIVER" = 'powerdns' ]]; then
+        install_package pdns-server pdns-backend-mysql
+    fi
 }
 
 # install_designateclient() - Collect source and prepare
