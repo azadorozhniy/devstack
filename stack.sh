@@ -884,6 +884,7 @@ if is_service_enabled key; then
     export OS_SERVICE_ENDPOINT=$SERVICE_ENDPOINT
     create_keystone_accounts
     create_nova_accounts
+    create_swift_accounts
     create_cinder_accounts
     create_neutron_accounts
     create_designate_accounts
@@ -1087,7 +1088,9 @@ if is_service_enabled nova; then
         iniset $NOVA_CONF DEFAULT vmwareapi_host_username "$VMWAREAPI_USER"
         iniset $NOVA_CONF DEFAULT vmwareapi_host_password "$VMWAREAPI_PASSWORD"
         iniset $NOVA_CONF DEFAULT vmwareapi_cluster_name "$VMWAREAPI_CLUSTER"
-
+        if is_service_enabled neutron; then
+            iniset $NOVA_CONF vmware integration_bridge $OVS_BRIDGE
+        fi
 
     # fake
     # ----
