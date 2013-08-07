@@ -407,6 +407,17 @@ create_nova_accounts() {
                 --publicurl "$NOVA_SERVICE_PROTOCOL://$NOVA_SERVICE_HOST:$NOVA_SERVICE_PORT/v2/\$(tenant_id)s" \
                 --adminurl "$NOVA_SERVICE_PROTOCOL://$NOVA_SERVICE_HOST:$NOVA_SERVICE_PORT/v2/\$(tenant_id)s" \
                 --internalurl "$NOVA_SERVICE_PROTOCOL://$NOVA_SERVICE_HOST:$NOVA_SERVICE_PORT/v2/\$(tenant_id)s"
+            NOVA_V3_SERVICE=$(keystone service-create \
+                --name=nova \
+                --type=computev3 \
+                --description="Nova Compute Service V3" \
+                | grep " id " | get_field 2)
+            keystone endpoint-create \
+                --region RegionOne \
+                --service_id $NOVA_V3_SERVICE \
+                --publicurl "$NOVA_SERVICE_PROTOCOL://$NOVA_SERVICE_HOST:$NOVA_SERVICE_PORT/v3" \
+                --adminurl "$NOVA_SERVICE_PROTOCOL://$NOVA_SERVICE_HOST:$NOVA_SERVICE_PORT/v3" \
+                --internalurl "$NOVA_SERVICE_PROTOCOL://$NOVA_SERVICE_HOST:$NOVA_SERVICE_PORT/v3"
         fi
     fi
 }
@@ -424,7 +435,7 @@ function create_nova_conf() {
     iniset $NOVA_CONF DEFAULT allow_resize_to_same_host "True"
     iniset $NOVA_CONF DEFAULT api_paste_config "$NOVA_API_PASTE_INI"
     iniset $NOVA_CONF DEFAULT rootwrap_config "$NOVA_CONF_DIR/rootwrap.conf"
-    iniset $NOVA_CONF DEFAULT compute_scheduler_driver "$SCHEDULER"
+    iniset $NOVA_CONF DEFAULT scheduler_driver "$SCHEDULER"
     iniset $NOVA_CONF DEFAULT dhcpbridge_flagfile "$NOVA_CONF"
     iniset $NOVA_CONF DEFAULT force_dhcp_release "True"
     iniset $NOVA_CONF DEFAULT fixed_range ""
@@ -491,7 +502,6 @@ function create_nova_conf() {
         iniset $NOVA_CONF DEFAULT instance_usage_audit "True"
         iniset $NOVA_CONF DEFAULT instance_usage_audit_period "hour"
         iniset $NOVA_CONF DEFAULT notify_on_state_change "vm_and_task_state"
-        iniset $NOVA_CONF DEFAULT notify_on_any_change "True"
         iniset_multiline $NOVA_CONF DEFAULT notification_driver "nova.openstack.common.notifier.rpc_notifier" "ceilometer.compute.nova_notifier"
     fi
 
@@ -558,11 +568,11 @@ function init_nova_cells() {
         iniset $NOVA_CELLS_CONF DEFAULT rabbit_virtual_host child_cell
         iniset $NOVA_CELLS_CONF DEFAULT dhcpbridge_flagfile $NOVA_CELLS_CONF
         iniset $NOVA_CELLS_CONF cells enable True
+        iniset $NOVA_CELLS_CONF cells cell_type compute
         iniset $NOVA_CELLS_CONF cells name child
 
-        iniset $NOVA_CONF DEFAULT scheduler_topic cells
-        iniset $NOVA_CONF DEFAULT compute_api_class nova.compute.cells_api.ComputeCellsAPI
         iniset $NOVA_CONF cells enable True
+        iniset $NOVA_CONF cells cell_type api
         iniset $NOVA_CONF cells name region
 
         if is_service_enabled n-api-meta; then
@@ -704,14 +714,19 @@ function start_nova() {
     if is_service_enabled n-cell; then
         NOVA_CONF_BOTTOM=$NOVA_CELLS_CONF
         screen_it n-cond "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-conductor --config-file $NOVA_CELLS_CONF"
-        screen_it n-cell "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-cells --config-file $NOVA_CONF"
-        screen_it n-cell "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-cells --config-file $NOVA_CELLS_CONF"
+        screen_it n-cell-region "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-cells --config-file $NOVA_CONF"
+        screen_it n-cell-child "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-cells --config-file $NOVA_CELLS_CONF"
     fi
 
     if [[ "$VIRT_DRIVER" = 'libvirt' ]]; then
         # The group **$LIBVIRT_GROUP** is added to the current user in this script.
         # Use 'sg' to execute nova-compute as a member of the **$LIBVIRT_GROUP** group.
         screen_it n-cpu "cd $NOVA_DIR && sg $LIBVIRT_GROUP '$NOVA_BIN_DIR/nova-compute --config-file $NOVA_CONF_BOTTOM'"
+    elif [[ "$VIRT_DRIVER" = 'fake' ]]; then
+       for i in `seq 1 $NUMBER_FAKE_NOVA_COMPUTE`
+       do
+           screen_it n-cpu "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-compute --config-file $NOVA_CONF_BOTTOM"
+       done
     else
         screen_it n-cpu "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-compute --config-file $NOVA_CONF_BOTTOM"
     fi
