@@ -7,9 +7,12 @@ src
 localrc
 local.sh
 files/*.gz
+files/*.qcow2
+files/*.img
 files/images
 stack-screenrc
 *.pem
 accrc
 .stackenv
 .prereqs
+.vagrant
