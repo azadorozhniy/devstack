@@ -77,7 +77,13 @@ function configure_designate() {
     fi
 
     if is_service_enabled key; then
+        # Setup the Keystone Integration
         iniset $DESIGNATE_CONF service:api auth_strategy keystone
+        iniset $DESIGNATE_CONF keystone_authtoken auth_protocol http
+        iniset $DESIGNATE_CONF keystone_authtoken admin_user designate
+        iniset $DESIGNATE_CONF keystone_authtoken admin_password $SERVICE_PASSWORD
+        iniset $DESIGNATE_CONF keystone_authtoken admin_tenant_name $SERVICE_TENANT_NAME
+        iniset $DESIGNATE_CONF keystone_authtoken signing_dir $DESIGNATE_AUTH_CACHE_DIR
     fi
 
     if is_service_enabled designate-agent; then
@@ -89,19 +95,9 @@ function configure_designate() {
 
     # Install the policy file for the API server
     cp $DESIGNATE_DIR/etc/designate/policy.json $DESIGNATE_CONF_DIR/policy.json
-    cp $DESIGNATE_DIR/etc/designate/api-paste.ini.sample $DESIGNATE_CONF_DIR/api-paste.ini
     iniset $DESIGNATE_CONF DEFAULT policy_file $DESIGNATE_CONF_DIR/policy.json
 
-    # Setup the API paste
-    iniset $DESIGNATE_API_PASTE_CONF filter:authtoken auth_protocol http
-    iniset $DESIGNATE_API_PASTE_CONF filter:authtoken admin_user designate
-    iniset $DESIGNATE_API_PASTE_CONF filter:authtoken admin_password $SERVICE_PASSWORD
-    iniset $DESIGNATE_API_PASTE_CONF filter:authtoken admin_tenant_name $SERVICE_TENANT_NAME
-    iniset $DESIGNATE_API_PASTE_CONF filter:authtoken signing_dir $DESIGNATE_AUTH_CACHE_DIR
-
-    #configure_database
-
-    #cleanup_designate
+    cleanup_designate
 }
 
 # create_designate_accounts() - Set up common required designate accounts
