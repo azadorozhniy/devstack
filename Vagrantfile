@@ -21,9 +21,9 @@ Vagrant.configure("2") do |config|
     config.vm.synced_folder "../python-designateclient", "/opt/stack/python-designateclient"
   end
 
-  # if Dir["../horizon"] != nil
-  #   config.vm.synced_folder "../horizon", "/opt/stack/horizon"
-  # end
+  if Dir["../horizon"] != nil
+    config.vm.synced_folder "../horizon", "/opt/stack/horizon"
+  end
   
   config.vm.provision :shell do |shell|
     shell.inline = %Q{
@@ -32,11 +32,11 @@ Vagrant.configure("2") do |config|
         apt-get install --yes git
       fi
 
-      if type -p screen >/dev/null && sudo -u vagrant screen -ls | egrep -q "[0-9].stack"; then
-        sudo -u vagrant /vagrant/unstack.sh
+      if type -p screen >/dev/null && sudo -i -u vagrant screen -ls | egrep -q "[0-9].stack"; then
+        sudo -i -u vagrant /vagrant/unstack.sh
       fi
 
-      sudo -u vagrant /vagrant/stack.sh
+      sudo -i -u vagrant /vagrant/stack.sh
     }
   end
 
