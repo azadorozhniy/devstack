@@ -2,19 +2,20 @@
 # Install and start **Cinder** volume service
 
 # Dependencies:
+#
 # - functions
 # - DEST, DATA_DIR, STACK_USER must be defined
-# SERVICE_{TENANT_NAME|PASSWORD} must be defined
-# ``KEYSTONE_TOKEN_FORMAT`` must be defined
+# - SERVICE_{TENANT_NAME|PASSWORD} must be defined
+# - ``KEYSTONE_TOKEN_FORMAT`` must be defined
 
 # stack.sh
 # ---------
-# install_cinder
-# configure_cinder
-# init_cinder
-# start_cinder
-# stop_cinder
-# cleanup_cinder
+# - install_cinder
+# - configure_cinder
+# - init_cinder
+# - start_cinder
+# - stop_cinder
+# - cleanup_cinder
 
 # Save trace setting
 XTRACE=$(set +o | grep xtrace)
@@ -82,7 +83,8 @@ VOLUME_NAME_PREFIX=${VOLUME_NAME_PREFIX:-volume-}
 # Functions
 # ---------
 # _clean_lvm_lv removes all cinder LVM volumes
-# _clean_lvm_lv $VOLUME_GROUP $VOLUME_NAME_PREFIX
+#
+# Usage: _clean_lvm_lv $VOLUME_GROUP $VOLUME_NAME_PREFIX
 function _clean_lvm_lv() {
     local vg=$1
     local lv_prefix=$2
@@ -98,7 +100,8 @@ function _clean_lvm_lv() {
 
 # _clean_lvm_backing_file() removes the backing file of the
 # volume group used by cinder
-# _clean_lvm_backing_file() $VOLUME_GROUP
+#
+# Usage: _clean_lvm_backing_file() $VOLUME_GROUP
 function _clean_lvm_backing_file() {
     local vg=$1
 
@@ -202,17 +205,27 @@ function configure_cinder() {
     sudo mv $TEMPFILE /etc/sudoers.d/cinder-rootwrap
 
     cp $CINDER_DIR/etc/cinder/api-paste.ini $CINDER_API_PASTE_INI
-    iniset $CINDER_API_PASTE_INI filter:authtoken auth_host $KEYSTONE_AUTH_HOST
-    iniset $CINDER_API_PASTE_INI filter:authtoken auth_port $KEYSTONE_AUTH_PORT
-    iniset $CINDER_API_PASTE_INI filter:authtoken auth_protocol $KEYSTONE_AUTH_PROTOCOL
-    iniset $CINDER_API_PASTE_INI filter:authtoken admin_tenant_name $SERVICE_TENANT_NAME
-    iniset $CINDER_API_PASTE_INI filter:authtoken admin_user cinder
-    iniset $CINDER_API_PASTE_INI filter:authtoken admin_password $SERVICE_PASSWORD
-    iniset $CINDER_API_PASTE_INI filter:authtoken signing_dir $CINDER_AUTH_CACHE_DIR
+
+    inicomment $CINDER_API_PASTE_INI filter:authtoken auth_host
+    inicomment $CINDER_API_PASTE_INI filter:authtoken auth_port
+    inicomment $CINDER_API_PASTE_INI filter:authtoken auth_protocol
+    inicomment $CINDER_API_PASTE_INI filter:authtoken admin_tenant_name
+    inicomment $CINDER_API_PASTE_INI filter:authtoken admin_user
+    inicomment $CINDER_API_PASTE_INI filter:authtoken admin_password
+    inicomment $CINDER_API_PASTE_INI filter:authtoken signing_dir
 
     cp $CINDER_DIR/etc/cinder/cinder.conf.sample $CINDER_CONF
+
+    iniset $CINDER_CONF keystone_authtoken auth_host $KEYSTONE_AUTH_HOST
+    iniset $CINDER_CONF keystone_authtoken auth_port $KEYSTONE_AUTH_PORT
+    iniset $CINDER_CONF keystone_authtoken auth_protocol $KEYSTONE_AUTH_PROTOCOL
+    iniset $CINDER_CONF keystone_authtoken admin_tenant_name $SERVICE_TENANT_NAME
+    iniset $CINDER_CONF keystone_authtoken admin_user cinder
+    iniset $CINDER_CONF keystone_authtoken admin_password $SERVICE_PASSWORD
+    iniset $CINDER_CONF keystone_authtoken signing_dir $CINDER_AUTH_CACHE_DIR
+
     iniset $CINDER_CONF DEFAULT auth_strategy keystone
-    iniset $CINDER_CONF DEFAULT debug True
+    iniset $CINDER_CONF DEFAULT debug $ENABLE_DEBUG_LOG_LEVEL
     iniset $CINDER_CONF DEFAULT verbose True
     if [ "$CINDER_MULTI_LVM_BACKEND" = "True" ]; then
         iniset $CINDER_CONF DEFAULT enabled_backends lvmdriver-1,lvmdriver-2
@@ -226,13 +239,19 @@ function configure_cinder() {
         iniset $CINDER_CONF DEFAULT volume_group $VOLUME_GROUP
         iniset $CINDER_CONF DEFAULT volume_name_template ${VOLUME_NAME_PREFIX}%s
     fi
+    iniset $CINDER_CONF DEFAULT my_ip "$CINDER_SERVICE_HOST"
     iniset $CINDER_CONF DEFAULT iscsi_helper tgtadm
     iniset $CINDER_CONF DEFAULT sql_connection `database_connection_url cinder`
     iniset $CINDER_CONF DEFAULT api_paste_config $CINDER_API_PASTE_INI
     iniset $CINDER_CONF DEFAULT rootwrap_config "$CINDER_CONF_DIR/rootwrap.conf"
     iniset $CINDER_CONF DEFAULT osapi_volume_extension cinder.api.contrib.standard_extensions
     iniset $CINDER_CONF DEFAULT state_path $CINDER_STATE_PATH
+    iniset $CINDER_CONF DEFAULT lock_path $CINDER_STATE_PATH
     iniset $CINDER_CONF DEFAULT periodic_interval $CINDER_PERIODIC_INTERVAL
+
+    if is_service_enabled ceilometer; then
+        iniset $CINDER_CONF DEFAULT notification_driver "cinder.openstack.common.notifier.rpc_notifier"
+    fi
 
     if is_service_enabled tls-proxy; then
         # Set the service port for a proxy to take the original
@@ -250,12 +269,9 @@ function configure_cinder() {
         iniset $CINDER_CONF DEFAULT volume_clear none
     fi
 
+    # Format logging
     if [ "$LOG_COLOR" == "True" ] && [ "$SYSLOG" == "False" ]; then
-        # Add color to logging output
-        iniset $CINDER_CONF DEFAULT logging_context_format_string "%(asctime)s.%(msecs)03d %(color)s%(levelname)s %(name)s [[01;36m%(request_id)s [00;36m%(user_id)s %(project_id)s%(color)s] [01;35m%(instance)s%(color)s%(message)s[00m"
-        iniset $CINDER_CONF DEFAULT logging_default_format_string "%(asctime)s.%(msecs)03d %(color)s%(levelname)s %(name)s [[00;36m-%(color)s] [01;35m%(instance)s%(color)s%(message)s[00m"
-        iniset $CINDER_CONF DEFAULT logging_debug_format_suffix "[00;33mfrom (pid=%(process)d) %(funcName)s %(pathname)s:%(lineno)d[00m"
-        iniset $CINDER_CONF DEFAULT logging_exception_prefix "%(color)s%(asctime)s.%(msecs)03d TRACE %(name)s [01;35m%(instance)s[00m"
+        setup_colorized_logging $CINDER_CONF DEFAULT "project_id" "user_id"
     fi
 
     if [ "$CINDER_DRIVER" == "XenAPINFS" ]; then
@@ -268,6 +284,11 @@ function configure_cinder() {
             iniset $CINDER_CONF DEFAULT xenapi_nfs_server "$CINDER_XENAPI_NFS_SERVER"
             iniset $CINDER_CONF DEFAULT xenapi_nfs_serverpath "$CINDER_XENAPI_NFS_SERVERPATH"
         )
+    elif [ "$CINDER_DRIVER" == "nfs" ]; then
+        iniset $CINDER_CONF DEFAULT volume_driver "cinder.volume.drivers.nfs.NfsDriver"
+        iniset $CINDER_CONF DEFAULT nfs_shares_config "$CINDER_CONF_DIR/nfs_shares.conf"
+        echo "$CINDER_NFS_SERVERPATH" | sudo tee "$CINDER_CONF_DIR/nfs_shares.conf"
+        sudo chmod 666 $CINDER_CONF_DIR/nfs_shares.conf
     elif [ "$CINDER_DRIVER" == "sheepdog" ]; then
         iniset $CINDER_CONF DEFAULT volume_driver "cinder.volume.drivers.sheepdog.SheepdogDriver"
     elif [ "$CINDER_DRIVER" == "glusterfs" ]; then
@@ -283,6 +304,12 @@ function configure_cinder() {
             CINDER_GLUSTERFS_SHARES=$(echo $CINDER_GLUSTERFS_SHARES | tr ";" "\n")
             echo "$CINDER_GLUSTERFS_SHARES" > $CINDER_CONF_DIR/glusterfs_shares
         fi
+    elif [ "$CINDER_DRIVER" == "vsphere" ]; then
+        echo_summary "Using VMware vCenter driver"
+        iniset $CINDER_CONF DEFAULT vmware_host_ip "$VMWAREAPI_IP"
+        iniset $CINDER_CONF DEFAULT vmware_host_username "$VMWAREAPI_USER"
+        iniset $CINDER_CONF DEFAULT vmware_host_password "$VMWAREAPI_PASSWORD"
+        iniset $CINDER_CONF DEFAULT volume_driver "cinder.volume.drivers.vmware.vmdk.VMwareVcVmdkDriver"
     fi
 
     if [[ is_fedora && $DISTRO =~ (rhel6) ]]; then
@@ -296,6 +323,10 @@ function configure_cinder() {
             -e 's/snapshot_autoextend_percent =.*/snapshot_autoextend_percent = 20/' \
             /etc/lvm/lvm.conf
     fi
+    iniset $CINDER_CONF keystone_authtoken auth_uri $KEYSTONE_SERVICE_PROTOCOL://$KEYSTONE_SERVICE_HOST:$KEYSTONE_SERVICE_PORT
+    iniset $CINDER_CONF keystone_authtoken admin_user cinder
+    iniset $CINDER_CONF keystone_authtoken admin_tenant_name $SERVICE_TENANT_NAME
+    iniset $CINDER_CONF keystone_authtoken admin_password $SERVICE_PASSWORD
 
 }
 
@@ -320,9 +351,9 @@ create_cinder_accounts() {
             --email=cinder@example.com \
             | grep " id " | get_field 2)
         keystone user-role-add \
-            --tenant_id $SERVICE_TENANT \
-            --user_id $CINDER_USER \
-            --role_id $ADMIN_ROLE
+            --tenant-id $SERVICE_TENANT \
+            --user-id $CINDER_USER \
+            --role-id $ADMIN_ROLE
         if [[ "$KEYSTONE_CATALOG_BACKEND" = 'sql' ]]; then
             CINDER_SERVICE=$(keystone service-create \
                 --name=cinder \
@@ -335,6 +366,18 @@ create_cinder_accounts() {
                 --publicurl "$CINDER_SERVICE_PROTOCOL://$CINDER_SERVICE_HOST:$CINDER_SERVICE_PORT/v1/\$(tenant_id)s" \
                 --adminurl "$CINDER_SERVICE_PROTOCOL://$CINDER_SERVICE_HOST:$CINDER_SERVICE_PORT/v1/\$(tenant_id)s" \
                 --internalurl "$CINDER_SERVICE_PROTOCOL://$CINDER_SERVICE_HOST:$CINDER_SERVICE_PORT/v1/\$(tenant_id)s"
+            CINDER_V2_SERVICE=$(keystone service-create \
+                --name=cinder \
+                --type=volumev2 \
+                --description="Cinder Volume Service V2" \
+                | grep " id " | get_field 2)
+            keystone endpoint-create \
+                --region RegionOne \
+                --service_id $CINDER_V2_SERVICE \
+                --publicurl "$CINDER_SERVICE_PROTOCOL://$CINDER_SERVICE_HOST:$CINDER_SERVICE_PORT/v2/\$(tenant_id)s" \
+                --adminurl "$CINDER_SERVICE_PROTOCOL://$CINDER_SERVICE_HOST:$CINDER_SERVICE_PORT/v2/\$(tenant_id)s" \
+                --internalurl "$CINDER_SERVICE_PROTOCOL://$CINDER_SERVICE_HOST:$CINDER_SERVICE_PORT/v2/\$(tenant_id)s"
+
         fi
     fi
 }
@@ -440,6 +483,7 @@ function install_cinder() {
 function install_cinderclient() {
     git_clone $CINDERCLIENT_REPO $CINDERCLIENT_DIR $CINDERCLIENT_BRANCH
     setup_develop $CINDERCLIENT_DIR
+    sudo install -D -m 0644 -o $STACK_USER {$CINDERCLIENT_DIR/tools/,/etc/bash_completion.d/}cinder.bash_completion
 }
 
 # apply config.d approach for cinder volumes directory
@@ -471,6 +515,8 @@ function start_cinder() {
             # name, and would need to be adjusted too
             exit_distro_not_supported "restarting tgt"
         fi
+        # NOTE(gfidente): ensure tgtd is running in debug mode
+        sudo tgtadm --mode system --op update --name debug --value on
     fi
 
     screen_it c-api "cd $CINDER_DIR && $CINDER_BIN_DIR/cinder-api --config-file $CINDER_CONF"
@@ -508,6 +554,7 @@ function stop_cinder() {
 # Restore xtrace
 $XTRACE
 
-# Local variables:
-# mode: shell-script
-# End:
+# Tell emacs to use shell-script-mode
+## Local variables:
+## mode: shell-script
+## End:

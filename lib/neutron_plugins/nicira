@@ -26,7 +26,6 @@ function is_neutron_ovs_base_plugin() {
 }
 
 function neutron_plugin_create_nova_conf() {
-    NOVA_VIF_DRIVER=${NOVA_VIF_DRIVER:-"nova.virt.libvirt.vif.LibvirtOpenVswitchDriver"}
     # if n-cpu is enabled, then setup integration bridge
     if is_service_enabled n-cpu; then
         setup_integration_bridge
@@ -58,13 +57,13 @@ function neutron_plugin_configure_dhcp_agent() {
 }
 
 function neutron_plugin_configure_l3_agent() {
-   # Nicira plugin does not run L3 agent
-   die $LINENO "q-l3 should must not be executed with Nicira plugin!"
+    # Nicira plugin does not run L3 agent
+    die $LINENO "q-l3 should must not be executed with Nicira plugin!"
 }
 
 function neutron_plugin_configure_plugin_agent() {
-   # Nicira plugin does not run L2 agent
-   die $LINENO "q-agt must not be executed with Nicira plugin!"
+    # Nicira plugin does not run L2 agent
+    die $LINENO "q-agt must not be executed with Nicira plugin!"
 }
 
 function neutron_plugin_configure_service() {
@@ -90,7 +89,7 @@ function neutron_plugin_configure_service() {
         iniset /$Q_PLUGIN_CONF_FILE DEFAULT default_l3_gw_service_uuid $DEFAULT_L3_GW_SVC_UUID
         Q_L3_ENABLED=True
         Q_L3_ROUTER_PER_TENANT=True
-        iniset /$Q_PLUGIN_CONF_FILE nvp enable_metadata_access_network True
+        iniset /$Q_PLUGIN_CONF_FILE nvp metadata_mode access_network
     fi
     if [[ "$DEFAULT_L2_GW_SVC_UUID" != "" ]]; then
         iniset /$Q_PLUGIN_CONF_FILE DEFAULT default_l2_gw_service_uuid $DEFAULT_L2_GW_SVC_UUID
@@ -118,6 +117,17 @@ function neutron_plugin_configure_service() {
     fi
     if [[ "$NVP_REDIRECTS" != "" ]]; then
         iniset /$Q_PLUGIN_CONF_FILE DEFAULT redirects $NVP_REDIRECTS
+    fi
+    if [[ "$AGENT_MODE" != "" ]]; then
+        iniset /$Q_PLUGIN_CONF_FILE nvp agent_mode $AGENT_MODE
+        if [[ "$AGENT_MODE" == "agentless" ]]; then
+            if [[ "$DEFAULT_SERVICE_CLUSTER_UUID" != "" ]]; then
+                iniset /$Q_PLUGIN_CONF_FILE DEFAULT default_service_cluster_uuid $DEFAULT_SERVICE_CLUSTER_UUID
+            else
+                die $LINENO "Agentless mode requires a service cluster."
+            fi
+            iniset /$Q_PLUGIN_CONF_FILE nvp_metadata metadata_server_address $Q_META_DATA_IP
+        fi
     fi
 }
 

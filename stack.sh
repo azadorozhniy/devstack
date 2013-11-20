@@ -2,8 +2,8 @@
 
 # ``stack.sh`` is an opinionated OpenStack developer installation.  It
 # installs and configures various combinations of **Ceilometer**, **Cinder**,
-# **Glance**, **Heat**, **Horizon**, **Keystone**, **Nova**, **Neutron**
-# and **Swift**.
+# **Glance**, **Heat**, **Horizon**, **Keystone**, **Nova**, **Neutron**,
+# **Swift**, and **Trove**
 
 # This script allows you to specify configuration options of what git
 # repositories to use, enabled services, network configuration and various
@@ -29,6 +29,9 @@ TOP_DIR=$(cd $(dirname "$0") && pwd)
 # Import common functions
 source $TOP_DIR/functions
 
+# Import config functions
+source $TOP_DIR/lib/config
+
 # Determine what system we are running on.  This provides ``os_VENDOR``,
 # ``os_RELEASE``, ``os_UPDATE``, ``os_PACKAGE``, ``os_CODENAME``
 # and ``DISTRO``
@@ -37,6 +40,25 @@ GetDistro
 
 # Global Settings
 # ===============
+
+# Check for a ``localrc`` section embedded in ``local.conf`` and extract if
+# ``localrc`` does not already exist
+
+# Phase: local
+rm -f $TOP_DIR/.localrc.auto
+if [[ -r $TOP_DIR/local.conf ]]; then
+    LRC=$(get_meta_section_files $TOP_DIR/local.conf local)
+    for lfile in $LRC; do
+        if [[ "$lfile" == "localrc" ]]; then
+            if [[ -r $TOP_DIR/localrc ]]; then
+                warn $LINENO "localrc and local.conf:[[local]] both exist, using localrc"
+            else
+                echo "# Generated file, do not edit" >$TOP_DIR/.localrc.auto
+                get_meta_section $TOP_DIR/local.conf local $lfile >>$TOP_DIR/.localrc.auto
+            fi
+        fi
+    done
+fi
 
 # ``stack.sh`` is customizable by setting environment variables.  Override a
 # default setting via export::
@@ -109,7 +131,7 @@ disable_negated_services
 
 # Warn users who aren't on an explicitly supported distro, but allow them to
 # override check and attempt installation with ``FORCE=yes ./stack``
-if [[ ! ${DISTRO} =~ (oneiric|precise|quantal|raring|saucy|7.0|wheezy|sid|testing|jessie|f16|f17|f18|f19|opensuse-12.2|rhel6) ]]; then
+if [[ ! ${DISTRO} =~ (oneiric|precise|quantal|raring|saucy|trusty|7.0|wheezy|sid|testing|jessie|f16|f17|f18|f19|opensuse-12.2|rhel6) ]]; then
     echo "WARNING: this script has not been tested on $DISTRO"
     if [[ "$FORCE" != "yes" ]]; then
         die $LINENO "If you wish to run this script anyway run with FORCE=yes"
@@ -150,8 +172,8 @@ fi
 
 if [[ is_fedora && $DISTRO =~ (rhel6) ]]; then
     # Installing Open vSwitch on RHEL6 requires enabling the RDO repo.
-    RHEL6_RDO_REPO_RPM=${RHEL6_RDO_REPO_RPM:-"http://rdo.fedorapeople.org/openstack/openstack-grizzly/rdo-release-grizzly-3.noarch.rpm"}
-    RHEL6_RDO_REPO_ID=${RHEL6_RDO_REPO_ID:-"openstack-grizzly"}
+    RHEL6_RDO_REPO_RPM=${RHEL6_RDO_REPO_RPM:-"http://rdo.fedorapeople.org/openstack-havana/rdo-release-havana.rpm"}
+    RHEL6_RDO_REPO_ID=${RHEL6_RDO_REPO_ID:-"openstack-havana"}
     if ! yum repolist enabled $RHEL6_RDO_REPO_ID | grep -q $RHEL6_RDO_REPO_ID; then
         echo "RDO repo not detected; installing"
         yum_install $RHEL6_RDO_REPO_RPM || \
@@ -172,70 +194,42 @@ fi
 # -----------
 
 # OpenStack is designed to be run as a non-root user; Horizon will fail to run
-# as **root** since Apache will not serve content from **root** user).  If
-# ``stack.sh`` is run as **root**, it automatically creates a **stack** user with
-# sudo privileges and runs as that user.
+# as **root** since Apache will not serve content from **root** user).
+# ``stack.sh`` must not be run as **root**.  It aborts and suggests one course of
+# action to create a suitable user account.
 
 if [[ $EUID -eq 0 ]]; then
-    ROOTSLEEP=${ROOTSLEEP:-10}
     echo "You are running this script as root."
-    echo "In $ROOTSLEEP seconds, we will create a user '$STACK_USER' and run as that user"
-    sleep $ROOTSLEEP
-
-    # Give the non-root user the ability to run as **root** via ``sudo``
-    is_package_installed sudo || install_package sudo
-    if ! getent group $STACK_USER >/dev/null; then
-        echo "Creating a group called $STACK_USER"
-        groupadd $STACK_USER
-    fi
-    if ! getent passwd $STACK_USER >/dev/null; then
-        echo "Creating a user called $STACK_USER"
-        useradd -g $STACK_USER -s /bin/bash -d $DEST -m $STACK_USER
-    fi
-
-    echo "Giving stack user passwordless sudo privileges"
-    # UEC images ``/etc/sudoers`` does not have a ``#includedir``, add one
-    grep -q "^#includedir.*/etc/sudoers.d" /etc/sudoers ||
-        echo "#includedir /etc/sudoers.d" >> /etc/sudoers
-    ( umask 226 && echo "$STACK_USER ALL=(ALL) NOPASSWD:ALL" \
-        > /etc/sudoers.d/50_stack_sh )
-
-    echo "Copying files to $STACK_USER user"
-    STACK_DIR="$DEST/${TOP_DIR##*/}"
-    cp -r -f -T "$TOP_DIR" "$STACK_DIR"
-    chown -R $STACK_USER "$STACK_DIR"
-    cd "$STACK_DIR"
-    if [[ "$SHELL_AFTER_RUN" != "no" ]]; then
-        exec sudo -u $STACK_USER  bash -l -c "set -e; bash stack.sh; bash"
-    else
-        exec sudo -u $STACK_USER bash -l -c "set -e; source stack.sh"
-    fi
+    echo "Cut it out."
+    echo "Really."
+    echo "If you need an account to run DevStack, do this (as root, heh) to create $STACK_USER:"
+    echo "$TOP_DIR/tools/create-stack-user.sh"
     exit 1
-else
-    # We're not **root**, make sure ``sudo`` is available
-    is_package_installed sudo || die "Sudo is required.  Re-run stack.sh as root ONE TIME ONLY to set up sudo."
-
-    # UEC images ``/etc/sudoers`` does not have a ``#includedir``, add one
-    sudo grep -q "^#includedir.*/etc/sudoers.d" /etc/sudoers ||
-        echo "#includedir /etc/sudoers.d" | sudo tee -a /etc/sudoers
-
-    # Set up devstack sudoers
-    TEMPFILE=`mktemp`
-    echo "$STACK_USER ALL=(root) NOPASSWD:ALL" >$TEMPFILE
-    # Some binaries might be under /sbin or /usr/sbin, so make sure sudo will
-    # see them by forcing PATH
-    echo "Defaults:$STACK_USER secure_path=/sbin:/usr/sbin:/usr/bin:/bin:/usr/local/sbin:/usr/local/bin" >> $TEMPFILE
-    chmod 0440 $TEMPFILE
-    sudo chown root:root $TEMPFILE
-    sudo mv $TEMPFILE /etc/sudoers.d/50_stack_sh
-
-    # Remove old file
-    sudo rm -f /etc/sudoers.d/stack_sh_nova
 fi
 
+# We're not **root**, make sure ``sudo`` is available
+is_package_installed sudo || install_package sudo
+
+# UEC images ``/etc/sudoers`` does not have a ``#includedir``, add one
+sudo grep -q "^#includedir.*/etc/sudoers.d" /etc/sudoers ||
+    echo "#includedir /etc/sudoers.d" | sudo tee -a /etc/sudoers
+
+# Set up devstack sudoers
+TEMPFILE=`mktemp`
+echo "$STACK_USER ALL=(root) NOPASSWD:ALL" >$TEMPFILE
+# Some binaries might be under /sbin or /usr/sbin, so make sure sudo will
+# see them by forcing PATH
+echo "Defaults:$STACK_USER secure_path=/sbin:/usr/sbin:/usr/bin:/bin:/usr/local/sbin:/usr/local/bin" >> $TEMPFILE
+chmod 0440 $TEMPFILE
+sudo chown root:root $TEMPFILE
+sudo mv $TEMPFILE /etc/sudoers.d/50_stack_sh
+
+
 # Create the destination directory and ensure it is writable by the user
+# and read/executable by everybody for daemons (e.g. apache run for horizon)
 sudo mkdir -p $DEST
-sudo chown -R $STACK_USER $DEST
+safe_chown -R $STACK_USER $DEST
+safe_chmod 0755 $DEST
 
 # a basic test for $DEST path permissions (fatal on error unless skipped)
 check_path_perm_sanity ${DEST}
@@ -250,10 +244,13 @@ OFFLINE=`trueorfalse False $OFFLINE`
 # operation.
 ERROR_ON_CLONE=`trueorfalse False $ERROR_ON_CLONE`
 
+# Whether to enable the debug log level in OpenStack services
+ENABLE_DEBUG_LOG_LEVEL=`trueorfalse True $ENABLE_DEBUG_LOG_LEVEL`
+
 # Destination path for service data
 DATA_DIR=${DATA_DIR:-${DEST}/data}
 sudo mkdir -p $DATA_DIR
-sudo chown -R $STACK_USER $DATA_DIR
+safe_chown -R $STACK_USER $DATA_DIR
 
 
 # Common Configuration
@@ -302,6 +299,7 @@ source $TOP_DIR/lib/apache
 source $TOP_DIR/lib/tls
 source $TOP_DIR/lib/infra
 source $TOP_DIR/lib/oslo
+source $TOP_DIR/lib/stackforge
 source $TOP_DIR/lib/horizon
 source $TOP_DIR/lib/keystone
 source $TOP_DIR/lib/glance
@@ -314,6 +312,18 @@ source $TOP_DIR/lib/designate
 source $TOP_DIR/lib/neutron
 source $TOP_DIR/lib/baremetal
 source $TOP_DIR/lib/ldap
+source $TOP_DIR/lib/ironic
+source $TOP_DIR/lib/trove
+
+# Extras Source
+# --------------
+
+# Phase: source
+if [[ -d $TOP_DIR/extras.d ]]; then
+    for i in $TOP_DIR/extras.d/*.sh; do
+        [[ -r $i ]] && source $i source
+    done
+fi
 
 # Set the destination directories for other OpenStack projects
 OPENSTACKCLIENT_DIR=$DEST/python-openstackclient
@@ -505,7 +515,7 @@ if [[ -n "$LOGFILE" ]]; then
         # Set fd 1 and 2 to primary logfile
         exec 1> "${LOGFILE}" 2>&1
         # Set fd 6 to summary logfile and stdout
-        exec 6> >( tee "${SUMFILE}" /dev/fd/3 )
+        exec 6> >( tee "${SUMFILE}" >&3 )
     fi
 
     echo_summary "stack.sh log $LOGFILE"
@@ -579,6 +589,14 @@ set -o xtrace
 echo_summary "Installing package prerequisites"
 source $TOP_DIR/tools/install_prereqs.sh
 
+# Configure an appropriate python environment
+if [[ "$OFFLINE" != "True" ]]; then
+    $TOP_DIR/tools/install_pip.sh
+fi
+
+# Do the ugly hacks for borken packages and distros
+$TOP_DIR/tools/fixup_stuff.sh
+
 install_rpc_backend
 
 if is_service_enabled $DATABASE_BACKENDS; then
@@ -587,66 +605,6 @@ fi
 
 if is_service_enabled neutron; then
     install_neutron_agent_packages
-fi
-
-# Unbreak the giant mess that is the current state of setuptools
-unfubar_setuptools
-
-# System-specific preconfigure
-# ============================
-
-if [[ is_fedora && $DISTRO =~ (rhel6) ]]; then
-    # Disable selinux to avoid configuring to allow Apache access
-    # to Horizon files or run nodejs (LP#1175444)
-    if selinuxenabled; then
-        sudo setenforce 0
-    fi
-
-    # The following workarounds break xenserver
-    if [ "$VIRT_DRIVER" != 'xenserver' ]; then
-        # An old version of ``python-crypto`` (2.0.1) may be installed on a
-        # fresh system via Anaconda and the dependency chain
-        # ``cas`` -> ``python-paramiko`` -> ``python-crypto``.
-        # ``pip uninstall pycrypto`` will remove the packaged ``.egg-info``
-        #  file but leave most of the actual library files behind in
-        # ``/usr/lib64/python2.6/Crypto``. Later ``pip install pycrypto``
-        # will install over the packaged files resulting
-        # in a useless mess of old, rpm-packaged files and pip-installed files.
-        # Remove the package so that ``pip install python-crypto`` installs
-        # cleanly.
-        # Note: other RPM packages may require ``python-crypto`` as well.
-        # For example, RHEL6 does not install ``python-paramiko packages``.
-        uninstall_package python-crypto
-
-        # A similar situation occurs with ``python-lxml``, which is required by
-        # ``ipa-client``, an auditing package we don't care about.  The
-        # build-dependencies needed for ``pip install lxml`` (``gcc``,
-        # ``libxml2-dev`` and ``libxslt-dev``) are present in
-        # ``files/rpms/general``.
-        uninstall_package python-lxml
-    fi
-
-    # If the ``dbus`` package was installed by DevStack dependencies the
-    # uuid may not be generated because the service was never started (PR#598200),
-    # causing Nova to stop later on complaining that ``/var/lib/dbus/machine-id``
-    # does not exist.
-    sudo service messagebus restart
-
-    # ``setup.py`` contains a ``setup_requires`` package that is supposed
-    # to be transient.  However, RHEL6 distribute has a bug where
-    # ``setup_requires`` registers entry points that are not cleaned
-    # out properly after the setup-phase resulting in installation failures
-    # (bz#924038).  Pre-install the problem package so the ``setup_requires``
-    # dependency is satisfied and it will not be installed transiently.
-    # Note we do this before the track-depends below.
-    pip_install hgtools
-
-    # RHEL6's version of ``python-nose`` is incompatible with Tempest.
-    # Install nose 1.1 (Tempest-compatible) from EPEL
-    install_package python-nose1.1
-    # Add a symlink for the new nosetests to allow tox for Tempest to
-    # work unmolested.
-    sudo ln -sf /usr/bin/nosetests1.1 /usr/local/bin/nosetests
 fi
 
 TRACK_DEPENDS=${TRACK_DEPENDS:-False}
@@ -672,6 +630,11 @@ install_infra
 
 # Install oslo libraries that have graduated
 install_oslo
+
+# Install stackforge libraries for testing
+if is_service_enabled stackforge_libs; then
+    install_stackforge
+fi
 
 # Install clients libraries
 install_keystoneclient
@@ -732,16 +695,6 @@ if is_service_enabled nova; then
     configure_nova
 fi
 
-if is_service_enabled n-novnc; then
-    # a websockets/html5 or flash powered VNC console for vm instances
-    git_clone $NOVNC_REPO $NOVNC_DIR $NOVNC_BRANCH
-fi
-
-if is_service_enabled n-spice; then
-    # a websockets/html5 or flash powered SPICE console for vm instances
-    git_clone $SPICE_REPO $SPICE_DIR $SPICE_BRANCH
-fi
-
 if is_service_enabled horizon; then
     # dashboard
     install_horizon
@@ -762,6 +715,12 @@ if is_service_enabled heat; then
     configure_heat
 fi
 
+if is_service_enabled trove; then
+    install_trove
+    install_troveclient
+    cleanup_trove
+fi
+
 if is_service_enabled designate; then
     install_designateclient
     install_designate
@@ -773,6 +732,22 @@ if is_service_enabled tls-proxy; then
     init_cert
     # Add name to /etc/hosts
     # don't be naive and add to existing line!
+fi
+
+if is_service_enabled ir-api ir-cond; then
+    install_ironic
+    install_ironicclient
+    configure_ironic
+fi
+
+# Extras Install
+# --------------
+
+# Phase: install
+if [[ -d $TOP_DIR/extras.d ]]; then
+    for i in $TOP_DIR/extras.d/*.sh; do
+        [[ -r $i ]] && source $i stack install
+    done
 fi
 
 if [[ $TRACK_DEPENDS = True ]]; then
@@ -870,12 +845,15 @@ init_service_check
 # If enabled, systat has to start early to track OpenStack service startup.
 if is_service_enabled sysstat;then
     if [[ -n ${SCREEN_LOGDIR} ]]; then
-        screen_it sysstat "sar -o $SCREEN_LOGDIR/$SYSSTAT_FILE $SYSSTAT_INTERVAL"
+        screen_it sysstat "cd ; sar -o $SCREEN_LOGDIR/$SYSSTAT_FILE $SYSSTAT_INTERVAL"
     else
         screen_it sysstat "sar $SYSSTAT_INTERVAL"
     fi
 fi
 
+
+# Start Services
+# ==============
 
 # Keystone
 # --------
@@ -902,6 +880,10 @@ if is_service_enabled key; then
     create_cinder_accounts
     create_neutron_accounts
     create_designate_accounts
+
+    if is_service_enabled trove; then
+        create_trove_accounts
+    fi
 
     if is_service_enabled swift || is_service_enabled s-proxy; then
         create_swift_accounts
@@ -945,6 +927,15 @@ if is_service_enabled g-reg; then
 fi
 
 
+# Ironic
+# ------
+
+if is_service_enabled ir-api ir-cond; then
+    echo_summary "Configuring Ironic"
+    init_ironic
+fi
+
+
 # Neutron
 # -------
 
@@ -970,11 +961,6 @@ fi
 # Nova
 # ----
 
-if is_service_enabled nova; then
-    echo_summary "Configuring Nova"
-    configure_nova
-fi
-
 if is_service_enabled n-net q-dhcp; then
     # Delete traces of nova networks from prior runs
     # Do not kill any dnsmasq instance spawned by NetworkManager
@@ -988,7 +974,7 @@ if is_service_enabled n-net q-dhcp; then
     clean_iptables
     rm -rf ${NOVA_STATE_PATH}/networks
     sudo mkdir -p ${NOVA_STATE_PATH}/networks
-    sudo chown -R ${USER} ${NOVA_STATE_PATH}/networks
+    safe_chown -R ${USER} ${NOVA_STATE_PATH}/networks
     # Force IP forwarding on, just in case
     sudo sysctl -w net.ipv4.ip_forward=1
 fi
@@ -1011,10 +997,12 @@ if is_service_enabled cinder; then
     init_cinder
 fi
 
+
+# Compute Service
+# ---------------
+
 if is_service_enabled nova; then
     echo_summary "Configuring Nova"
-    # Rebuild the config file from scratch
-    create_nova_conf
     init_nova
 
     # Additional Nova configuration that is dependent on other services
@@ -1022,135 +1010,6 @@ if is_service_enabled nova; then
         create_nova_conf_neutron
     elif is_service_enabled n-net; then
         create_nova_conf_nova_network
-    fi
-
-
-    # XenServer
-    # ---------
-
-    if [ "$VIRT_DRIVER" = 'xenserver' ]; then
-        echo_summary "Using XenServer virtualization driver"
-        if [ -z "$XENAPI_CONNECTION_URL" ]; then
-            die $LINENO "XENAPI_CONNECTION_URL is not specified"
-        fi
-        read_password XENAPI_PASSWORD "ENTER A PASSWORD TO USE FOR XEN."
-        iniset $NOVA_CONF DEFAULT compute_driver "xenapi.XenAPIDriver"
-        iniset $NOVA_CONF DEFAULT xenapi_connection_url "$XENAPI_CONNECTION_URL"
-        iniset $NOVA_CONF DEFAULT xenapi_connection_username "$XENAPI_USER"
-        iniset $NOVA_CONF DEFAULT xenapi_connection_password "$XENAPI_PASSWORD"
-        iniset $NOVA_CONF DEFAULT flat_injected "False"
-        # Need to avoid crash due to new firewall support
-        XEN_FIREWALL_DRIVER=${XEN_FIREWALL_DRIVER:-"nova.virt.firewall.IptablesFirewallDriver"}
-        iniset $NOVA_CONF DEFAULT firewall_driver "$XEN_FIREWALL_DRIVER"
-
-
-    # OpenVZ
-    # ------
-
-    elif [ "$VIRT_DRIVER" = 'openvz' ]; then
-        echo_summary "Using OpenVZ virtualization driver"
-        iniset $NOVA_CONF DEFAULT compute_driver "openvz.OpenVzDriver"
-        iniset $NOVA_CONF DEFAULT connection_type "openvz"
-        LIBVIRT_FIREWALL_DRIVER=${LIBVIRT_FIREWALL_DRIVER:-"nova.virt.libvirt.firewall.IptablesFirewallDriver"}
-        iniset $NOVA_CONF DEFAULT firewall_driver "$LIBVIRT_FIREWALL_DRIVER"
-
-
-    # Bare Metal
-    # ----------
-
-    elif [ "$VIRT_DRIVER" = 'baremetal' ]; then
-        echo_summary "Using BareMetal driver"
-        LIBVIRT_FIREWALL_DRIVER=${LIBVIRT_FIREWALL_DRIVER:-"nova.virt.firewall.NoopFirewallDriver"}
-        iniset $NOVA_CONF DEFAULT compute_driver nova.virt.baremetal.driver.BareMetalDriver
-        iniset $NOVA_CONF DEFAULT firewall_driver $LIBVIRT_FIREWALL_DRIVER
-        iniset $NOVA_CONF DEFAULT scheduler_host_manager nova.scheduler.baremetal_host_manager.BaremetalHostManager
-        iniset $NOVA_CONF DEFAULT ram_allocation_ratio 1.0
-        iniset $NOVA_CONF DEFAULT reserved_host_memory_mb 0
-        iniset $NOVA_CONF baremetal instance_type_extra_specs cpu_arch:$BM_CPU_ARCH
-        iniset $NOVA_CONF baremetal driver $BM_DRIVER
-        iniset $NOVA_CONF baremetal power_manager $BM_POWER_MANAGER
-        iniset $NOVA_CONF baremetal tftp_root /tftpboot
-        if [[ "$BM_DNSMASQ_FROM_NOVA_NETWORK" = "True" ]]; then
-            BM_DNSMASQ_CONF=$NOVA_CONF_DIR/dnsmasq-for-baremetal-from-nova-network.conf
-            sudo cp "$FILES/dnsmasq-for-baremetal-from-nova-network.conf" "$BM_DNSMASQ_CONF"
-            iniset $NOVA_CONF DEFAULT dnsmasq_config_file "$BM_DNSMASQ_CONF"
-        fi
-
-        # Define extra baremetal nova conf flags by defining the array ``EXTRA_BAREMETAL_OPTS``.
-        for I in "${EXTRA_BAREMETAL_OPTS[@]}"; do
-           # Attempt to convert flags to options
-           iniset $NOVA_CONF baremetal ${I/=/ }
-        done
-
-
-   # PowerVM
-   # -------
-
-    elif [ "$VIRT_DRIVER" = 'powervm' ]; then
-        echo_summary "Using PowerVM driver"
-        POWERVM_MGR_TYPE=${POWERVM_MGR_TYPE:-"ivm"}
-        POWERVM_MGR_HOST=${POWERVM_MGR_HOST:-"powervm.host"}
-        POWERVM_MGR_USER=${POWERVM_MGR_USER:-"padmin"}
-        POWERVM_MGR_PASSWD=${POWERVM_MGR_PASSWD:-"password"}
-        POWERVM_IMG_REMOTE_PATH=${POWERVM_IMG_REMOTE_PATH:-"/tmp"}
-        POWERVM_IMG_LOCAL_PATH=${POWERVM_IMG_LOCAL_PATH:-"/tmp"}
-        iniset $NOVA_CONF DEFAULT compute_driver nova.virt.powervm.PowerVMDriver
-        iniset $NOVA_CONF DEFAULT powervm_mgr_type $POWERVM_MGR_TYPE
-        iniset $NOVA_CONF DEFAULT powervm_mgr $POWERVM_MGR_HOST
-        iniset $NOVA_CONF DEFAULT powervm_mgr_user $POWERVM_MGR_USER
-        iniset $NOVA_CONF DEFAULT powervm_mgr_passwd $POWERVM_MGR_PASSWD
-        iniset $NOVA_CONF DEFAULT powervm_img_remote_path $POWERVM_IMG_REMOTE_PATH
-        iniset $NOVA_CONF DEFAULT powervm_img_local_path $POWERVM_IMG_LOCAL_PATH
-
-
-    # vSphere API
-    # -----------
-
-    elif [ "$VIRT_DRIVER" = 'vsphere' ]; then
-        echo_summary "Using VMware vCenter driver"
-        iniset $NOVA_CONF DEFAULT compute_driver "vmwareapi.VMwareVCDriver"
-        VMWAREAPI_USER=${VMWAREAPI_USER:-"root"}
-        iniset $NOVA_CONF vmware host_ip "$VMWAREAPI_IP"
-        iniset $NOVA_CONF vmware host_username "$VMWAREAPI_USER"
-        iniset $NOVA_CONF vmware host_password "$VMWAREAPI_PASSWORD"
-        iniset $NOVA_CONF vmware cluster_name "$VMWAREAPI_CLUSTER"
-        if is_service_enabled neutron; then
-            iniset $NOVA_CONF vmware integration_bridge $OVS_BRIDGE
-        fi
-
-    # fake
-    # ----
-
-    elif [ "$VIRT_DRIVER" = 'fake' ]; then
-        echo_summary "Using fake Virt driver"
-        iniset $NOVA_CONF DEFAULT compute_driver "nova.virt.fake.FakeDriver"
-        # Disable arbitrary limits
-        iniset $NOVA_CONF DEFAULT quota_instances -1
-        iniset $NOVA_CONF DEFAULT quota_cores -1
-        iniset $NOVA_CONF DEFAULT quota_ram -1
-        iniset $NOVA_CONF DEFAULT quota_floating_ips -1
-        iniset $NOVA_CONF DEFAULT quota_fixed_ips -1
-        iniset $NOVA_CONF DEFAULT quota_metadata_items -1
-        iniset $NOVA_CONF DEFAULT quota_injected_files -1
-        iniset $NOVA_CONF DEFAULT quota_injected_file_path_bytes -1
-        iniset $NOVA_CONF DEFAULT quota_security_groups -1
-        iniset $NOVA_CONF DEFAULT quota_security_group_rules -1
-        iniset $NOVA_CONF DEFAULT quota_key_pairs -1
-        iniset $NOVA_CONF DEFAULT scheduler_default_filters "RetryFilter,AvailabilityZoneFilter,ComputeFilter,ComputeCapabilitiesFilter,ImagePropertiesFilter"
-
-
-    # Default libvirt
-    # ---------------
-
-    else
-        echo_summary "Using libvirt virtualization driver"
-        iniset $NOVA_CONF DEFAULT compute_driver "libvirt.LibvirtDriver"
-        LIBVIRT_FIREWALL_DRIVER=${LIBVIRT_FIREWALL_DRIVER:-"nova.virt.libvirt.firewall.IptablesFirewallDriver"}
-        iniset $NOVA_CONF DEFAULT firewall_driver "$LIBVIRT_FIREWALL_DRIVER"
-        # Power architecture currently does not support graphical consoles.
-        if is_arch "ppc64"; then
-            iniset $NOVA_CONF DEFAULT vnc_enabled "false"
-        fi
     fi
 
     init_nova_cells
@@ -1162,9 +1021,28 @@ if is_service_enabled nova && is_baremetal; then
     prepare_baremetal_toolchain
     configure_baremetal_nova_dirs
     if [[ "$BM_USE_FAKE_ENV" = "True" ]]; then
-       create_fake_baremetal_env
+        create_fake_baremetal_env
     fi
 fi
+
+
+# Extras Configuration
+# ====================
+
+# Phase: post-config
+if [[ -d $TOP_DIR/extras.d ]]; then
+    for i in $TOP_DIR/extras.d/*.sh; do
+        [[ -r $i ]] && source $i stack post-config
+    done
+fi
+
+
+# Local Configuration
+# ===================
+
+# Apply configuration from local.conf if it exists for layer 2 services
+# Phase: post-config
+merge_config_group $TOP_DIR/local.conf post-config
 
 
 # Launch Services
@@ -1182,6 +1060,12 @@ fi
 if is_service_enabled g-api g-reg; then
     echo_summary "Starting Glance"
     start_glance
+fi
+
+# Launch the Ironic services
+if is_service_enabled ir-api ir-cond; then
+    echo_summary "Starting Ironic"
+    start_ironic
 fi
 
 # Create an access key and secret key for nova ec2 register image
@@ -1255,6 +1139,19 @@ if is_service_enabled heat; then
     start_heat
 fi
 
+# Configure and launch the trove service api, and taskmanager
+if is_service_enabled trove; then
+    # Initialize trove
+    echo_summary "Configuring Trove"
+    configure_troveclient
+    configure_trove
+    init_trove
+
+    # Start the trove API and trove taskmgr components
+    echo_summary "Starting Trove"
+    start_trove
+fi
+
 if is_service_enabled designate; then
     echo_summary "Configuring Designate"
     configure_designate
@@ -1264,7 +1161,6 @@ if is_service_enabled designate; then
     start_designate
     create_designate_initial_resources
 fi
-
 
 # Create account rc files
 # =======================
@@ -1294,28 +1190,29 @@ fi
 
 if is_service_enabled g-reg; then
     TOKEN=$(keystone token-get | grep ' id ' | get_field 2)
+    die_if_not_set $LINENO TOKEN "Keystone fail to get token"
 
     if is_baremetal; then
-       echo_summary "Creating and uploading baremetal images"
+        echo_summary "Creating and uploading baremetal images"
 
-       # build and upload separate deploy kernel & ramdisk
-       upload_baremetal_deploy $TOKEN
+        # build and upload separate deploy kernel & ramdisk
+        upload_baremetal_deploy $TOKEN
 
-       # upload images, separating out the kernel & ramdisk for PXE boot
-       for image_url in ${IMAGE_URLS//,/ }; do
-           upload_baremetal_image $image_url $TOKEN
-       done
+        # upload images, separating out the kernel & ramdisk for PXE boot
+        for image_url in ${IMAGE_URLS//,/ }; do
+            upload_baremetal_image $image_url $TOKEN
+        done
     else
-       echo_summary "Uploading images"
+        echo_summary "Uploading images"
 
-       # Option to upload legacy ami-tty, which works with xenserver
-       if [[ -n "$UPLOAD_LEGACY_TTY" ]]; then
-           IMAGE_URLS="${IMAGE_URLS:+${IMAGE_URLS},}https://github.com/downloads/citrix-openstack/warehouse/tty.tgz"
-       fi
+        # Option to upload legacy ami-tty, which works with xenserver
+        if [[ -n "$UPLOAD_LEGACY_TTY" ]]; then
+            IMAGE_URLS="${IMAGE_URLS:+${IMAGE_URLS},}https://github.com/downloads/citrix-openstack/warehouse/tty.tgz"
+        fi
 
-       for image_url in ${IMAGE_URLS//,/ }; do
-           upload_image $image_url $TOKEN
-       done
+        for image_url in ${IMAGE_URLS//,/ }; do
+            upload_image $image_url $TOKEN
+        done
     fi
 fi
 
@@ -1327,7 +1224,7 @@ fi
 if is_service_enabled nova && is_baremetal; then
     # create special flavor for baremetal if we know what images to associate
     [[ -n "$BM_DEPLOY_KERNEL_ID" ]] && [[ -n "$BM_DEPLOY_RAMDISK_ID" ]] && \
-       create_baremetal_flavor $BM_DEPLOY_KERNEL_ID $BM_DEPLOY_RAMDISK_ID
+        create_baremetal_flavor $BM_DEPLOY_KERNEL_ID $BM_DEPLOY_RAMDISK_ID
 
     # otherwise user can manually add it later by calling nova-baremetal-manage
     [[ -n "$BM_FIRST_MAC" ]] && add_baremetal_node
@@ -1342,24 +1239,33 @@ if is_service_enabled nova && is_baremetal; then
     fi
     # ensure callback daemon is running
     sudo pkill nova-baremetal-deploy-helper || true
-    screen_it baremetal "nova-baremetal-deploy-helper"
+    screen_it baremetal "cd ; nova-baremetal-deploy-helper"
 fi
 
 # Save some values we generated for later use
 CURRENT_RUN_TIME=$(date "+$TIMESTAMP_FORMAT")
 echo "# $CURRENT_RUN_TIME" >$TOP_DIR/.stackenv
 for i in BASE_SQL_CONN ENABLED_SERVICES HOST_IP LOGFILE \
-  SERVICE_HOST SERVICE_PROTOCOL STACK_USER TLS_IP; do
+    SERVICE_HOST SERVICE_PROTOCOL STACK_USER TLS_IP; do
     echo $i=${!i} >>$TOP_DIR/.stackenv
 done
+
+
+# Local Configuration
+# ===================
+
+# Apply configuration from local.conf if it exists for layer 2 services
+# Phase: extra
+merge_config_group $TOP_DIR/local.conf extra
 
 
 # Run extras
 # ==========
 
+# Phase: extra
 if [[ -d $TOP_DIR/extras.d ]]; then
     for i in $TOP_DIR/extras.d/*.sh; do
-        [[ -r $i ]] && source $i stack
+        [[ -r $i ]] && source $i stack extra
     done
 fi
 
@@ -1424,6 +1330,67 @@ echo "This is your host ip: $HOST_IP"
 # Warn that a deprecated feature was used
 if [[ -n "$DEPRECATED_TEXT" ]]; then
     echo_summary "WARNING: $DEPRECATED_TEXT"
+fi
+
+# Specific warning for deprecated configs
+if [[ -n "$EXTRA_OPTS" ]]; then
+    echo ""
+    echo_summary "WARNING: EXTRA_OPTS is used"
+    echo "You are using EXTRA_OPTS to pass configuration into nova.conf."
+    echo "Please convert that configuration in localrc to a nova.conf section in local.conf:"
+    echo "
+[[post-config|\$NOVA_CONF]]
+[DEFAULT]
+"
+    for I in "${EXTRA_OPTS[@]}"; do
+        # Replace the first '=' with ' ' for iniset syntax
+        echo ${I}
+    done
+fi
+
+if [[ -n "$EXTRA_BAREMETAL_OPTS" ]]; then
+    echo ""
+    echo_summary "WARNING: EXTRA_OPTS is used"
+    echo "You are using EXTRA_OPTS to pass configuration into nova.conf."
+    echo "Please convert that configuration in localrc to a nova.conf section in local.conf:"
+    echo "
+[[post-config|\$NOVA_CONF]]
+[baremetal]
+"
+    for I in "${EXTRA_BAREMETAL_OPTS[@]}"; do
+        # Replace the first '=' with ' ' for iniset syntax
+        echo ${I}
+    done
+fi
+
+if [[ -n "$Q_DHCP_EXTRA_DEFAULT_OPTS" ]]; then
+    echo ""
+    echo_summary "WARNING: Q_DHCP_EXTRA_DEFAULT_OPTS is used"
+    echo "You are using Q_DHCP_EXTRA_DEFAULT_OPTS to pass configuration into $Q_DHCP_CONF_FILE."
+    echo "Please convert that configuration in localrc to a $Q_DHCP_CONF_FILE section in local.conf:"
+    echo "
+[[post-config|\$Q_DHCP_CONF_FILE]]
+[DEFAULT]
+"
+    for I in "${Q_DHCP_EXTRA_DEFAULT_OPTS[@]}"; do
+        # Replace the first '=' with ' ' for iniset syntax
+        echo ${I}
+    done
+fi
+
+if [[ -n "$Q_SRV_EXTRA_DEFAULT_OPTS" ]]; then
+    echo ""
+    echo_summary "WARNING: Q_SRV_EXTRA_DEFAULT_OPTS is used"
+    echo "You are using Q_SRV_EXTRA_DEFAULT_OPTS to pass configuration into $NEUTRON_CONF."
+    echo "Please convert that configuration in localrc to a $NEUTRON_CONF section in local.conf:"
+    echo "
+[[post-config|\$NEUTRON_CONF]]
+[DEFAULT]
+"
+    for I in "${Q_SRV_EXTRA_DEFAULT_OPTS[@]}"; do
+        # Replace the first '=' with ' ' for iniset syntax
+        echo ${I}
+    done
 fi
 
 # Indicate how long this took to run (bash maintained variable ``SECONDS``)

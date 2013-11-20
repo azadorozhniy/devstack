@@ -24,6 +24,12 @@ source $TOP_DIR/stackrc
 # Destination path for service data
 DATA_DIR=${DATA_DIR:-${DEST}/data}
 
+if [[ $EUID -eq 0 ]]; then
+    echo "You are running this script as root."
+    echo "It might work but you will have a better day running it as $STACK_USER"
+    exit 1
+fi
+
 # Import apache functions
 source $TOP_DIR/lib/apache
 
@@ -33,6 +39,18 @@ source $TOP_DIR/lib/cinder
 source $TOP_DIR/lib/horizon
 source $TOP_DIR/lib/swift
 source $TOP_DIR/lib/neutron
+source $TOP_DIR/lib/ironic
+source $TOP_DIR/lib/trove
+
+# Extras Source
+# --------------
+
+# Phase: source
+if [[ -d $TOP_DIR/extras.d ]]; then
+    for i in $TOP_DIR/extras.d/*.sh; do
+        [[ -r $i ]] && source $i source
+    done
+fi
 
 # Determine what system we are running on.  This provides ``os_VENDOR``,
 # ``os_RELEASE``, ``os_UPDATE``, ``os_PACKAGE``, ``os_CODENAME``
@@ -45,6 +63,7 @@ fi
 # Run extras
 # ==========
 
+# Phase: unstack
 if [[ -d $TOP_DIR/extras.d ]]; then
     for i in $TOP_DIR/extras.d/*.sh; do
         [[ -r $i ]] && source $i unstack
@@ -65,10 +84,24 @@ if [[ -n "$SCREEN" ]]; then
     fi
 fi
 
+# Shut down Nova hypervisor plugins after Nova
+NOVA_PLUGINS=$TOP_DIR/lib/nova_plugins
+if is_service_enabled nova && [[ -r $NOVA_PLUGINS/hypervisor-$VIRT_DRIVER ]]; then
+    # Load plugin
+    source $NOVA_PLUGINS/hypervisor-$VIRT_DRIVER
+    stop_nova_hypervisor
+fi
+
 # Swift runs daemons
 if is_service_enabled s-proxy; then
     stop_swift
     cleanup_swift
+fi
+
+# Ironic runs daemons
+if is_service_enabled ir-api ir-cond; then
+    stop_ironic
+    cleanup_ironic
 fi
 
 # Apache has the WSGI processes
@@ -113,6 +146,10 @@ if is_service_enabled neutron; then
     stop_neutron
     stop_neutron_third_party
     cleanup_neutron
+fi
+
+if is_service_enabled trove; then
+    cleanup_trove
 fi
 
 cleanup_tmp

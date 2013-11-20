@@ -2,23 +2,26 @@
 # Functions to control the configuration and operation of **Keystone**
 
 # Dependencies:
-# ``functions`` file
-# ``DEST``, ``STACK_USER``
-# ``IDENTITY_API_VERSION``
-# ``BASE_SQL_CONN``
-# ``SERVICE_HOST``, ``SERVICE_PROTOCOL``
-# ``SERVICE_TOKEN``
-# ``S3_SERVICE_PORT`` (template backend only)
+#
+# - ``functions`` file
+# - ``DEST``, ``STACK_USER``
+# - ``IDENTITY_API_VERSION``
+# - ``BASE_SQL_CONN``
+# - ``SERVICE_HOST``, ``SERVICE_PROTOCOL``
+# - ``SERVICE_TOKEN``
+# - ``S3_SERVICE_PORT`` (template backend only)
 
 # ``stack.sh`` calls the entry points in this order:
 #
-# install_keystone
-# configure_keystone
-# init_keystone
-# start_keystone
-# create_keystone_accounts
-# stop_keystone
-# cleanup_keystone
+# - install_keystone
+# - configure_keystone
+# - _config_keystone_apache_wsgi
+# - init_keystone
+# - start_keystone
+# - create_keystone_accounts
+# - stop_keystone
+# - cleanup_keystone
+# - _cleanup_keystone_apache_wsgi
 
 # Save trace setting
 XTRACE=$(set +o | grep xtrace)
@@ -34,6 +37,7 @@ KEYSTONE_CONF_DIR=${KEYSTONE_CONF_DIR:-/etc/keystone}
 KEYSTONE_CONF=$KEYSTONE_CONF_DIR/keystone.conf
 KEYSTONE_PASTE_INI=${KEYSTONE_PASTE_INI:-$KEYSTONE_CONF_DIR/keystone-paste.ini}
 KEYSTONE_AUTH_CACHE_DIR=${KEYSTONE_AUTH_CACHE_DIR:-/var/cache/keystone}
+KEYSTONE_WSGI_DIR=${KEYSTONE_WSGI_DIR:-/var/www/keystone}
 
 KEYSTONECLIENT_DIR=$DEST/python-keystoneclient
 
@@ -43,6 +47,12 @@ KEYSTONE_CATALOG=$KEYSTONE_CONF_DIR/default_catalog.templates
 
 # Select the backend for Tokens
 KEYSTONE_TOKEN_BACKEND=${KEYSTONE_TOKEN_BACKEND:-sql}
+
+# Select the backend for Identity
+KEYSTONE_IDENTITY_BACKEND=${KEYSTONE_IDENTITY_BACKEND:-sql}
+
+# Select the backend for Assignment
+KEYSTONE_ASSIGNMENT_BACKEND=${KEYSTONE_ASSIGNMENT_BACKEND:-sql}
 
 # Select Keystone's token format
 # Choose from 'UUID' and 'PKI'
@@ -63,10 +73,14 @@ KEYSTONE_SERVICE_PROTOCOL=${KEYSTONE_SERVICE_PROTOCOL:-$SERVICE_PROTOCOL}
 # Set the tenant for service accounts in Keystone
 SERVICE_TENANT_NAME=${SERVICE_TENANT_NAME:-service}
 
+# valid identity backends as per dir keystone/identity/backends
+KEYSTONE_VALID_IDENTITY_BACKENDS=kvs,ldap,pam,sql
+
+# valid assignment backends as per dir keystone/identity/backends
+KEYSTONE_VALID_ASSIGNMENT_BACKENDS=kvs,ldap,sql
 
 # Functions
 # ---------
-
 # cleanup_keystone() - Remove residual data files, anything left over from previous
 # runs that a clean run would need to clean up
 function cleanup_keystone() {
@@ -74,6 +88,33 @@ function cleanup_keystone() {
     # delete image files (glance)
     # This function intentionally left blank
     :
+}
+
+# _cleanup_keystone_apache_wsgi() - Remove wsgi files, disable and remove apache vhost file
+function _cleanup_keystone_apache_wsgi() {
+    sudo rm -f $KEYSTONE_WSGI_DIR/*.wsgi
+    disable_apache_site keystone
+    sudo rm -f /etc/$APACHE_NAME/$APACHE_CONF_DIR/keystone
+}
+
+# _config_keystone_apache_wsgi() - Set WSGI config files of Keystone
+function _config_keystone_apache_wsgi() {
+    sudo mkdir -p $KEYSTONE_WSGI_DIR
+
+    # copy proxy vhost and wsgi file
+    sudo cp $KEYSTONE_DIR/httpd/keystone.py $KEYSTONE_WSGI_DIR/main
+    sudo cp $KEYSTONE_DIR/httpd/keystone.py $KEYSTONE_WSGI_DIR/admin
+
+    sudo cp $FILES/apache-keystone.template /etc/$APACHE_NAME/$APACHE_CONF_DIR/keystone
+    sudo sed -e "
+        s|%PUBLICPORT%|$KEYSTONE_SERVICE_PORT|g;
+        s|%ADMINPORT%|$KEYSTONE_AUTH_PORT|g;
+        s|%APACHE_NAME%|$APACHE_NAME|g;
+        s|%PUBLICWSGI%|$KEYSTONE_WSGI_DIR/main|g;
+        s|%ADMINWSGI%|$KEYSTONE_WSGI_DIR/admin|g;
+        s|%USER%|$STACK_USER|g
+    " -i /etc/$APACHE_NAME/$APACHE_CONF_DIR/keystone
+    enable_apache_site keystone
 }
 
 # configure_keystone() - Set config files, create data dirs, etc
@@ -85,6 +126,7 @@ function configure_keystone() {
 
     if [[ "$KEYSTONE_CONF_DIR" != "$KEYSTONE_DIR/etc" ]]; then
         cp -p $KEYSTONE_DIR/etc/keystone.conf.sample $KEYSTONE_CONF
+        chmod 600 $KEYSTONE_CONF
         cp -p $KEYSTONE_DIR/etc/policy.json $KEYSTONE_CONF_DIR
         if [[ -f "$KEYSTONE_DIR/etc/keystone-paste.ini" ]]; then
             cp -p "$KEYSTONE_DIR/etc/keystone-paste.ini" "$KEYSTONE_PASTE_INI"
@@ -105,7 +147,7 @@ function configure_keystone() {
         iniset $KEYSTONE_CONF ldap user "dc=Manager,dc=openstack,dc=org"
         iniset $KEYSTONE_CONF ldap suffix "dc=openstack,dc=org"
         iniset $KEYSTONE_CONF ldap use_dumb_member "True"
-        iniset $KEYSTONE_CONF ldap user_attribute_ignore "enabled,email,tenants,tenantId"
+        iniset $KEYSTONE_CONF ldap user_attribute_ignore "enabled,email,tenants,default_project_id"
         iniset $KEYSTONE_CONF ldap tenant_attribute_ignore "enabled"
         iniset $KEYSTONE_CONF ldap tenant_domain_id_attribute "businessCategory"
         iniset $KEYSTONE_CONF ldap tenant_desc_attribute "description"
@@ -116,8 +158,14 @@ function configure_keystone() {
         iniset $KEYSTONE_CONF DEFAULT member_role_name "_member_"
     fi
 
-    if [[  "$KEYSTONE_IDENTITY_BACKEND" == "ldap"  ]]; then
-        iniset $KEYSTONE_CONF identity driver "keystone.identity.backends.ldap.Identity"
+    # check if identity backend is valid
+    if [[ "$KEYSTONE_VALID_IDENTITY_BACKENDS" =~ "$KEYSTONE_IDENTITY_BACKEND" ]]; then
+        iniset $KEYSTONE_CONF identity driver "keystone.identity.backends.$KEYSTONE_IDENTITY_BACKEND.Identity"
+    fi
+
+    # check if assignment backend is valid
+    if [[ "$KEYSTONE_VALID_ASSIGNMENT_BACKENDS" =~ "$KEYSTONE_ASSIGNMENT_BACKEND" ]]; then
+        iniset $KEYSTONE_CONF assignment driver "keystone.assignment.backends.$KEYSTONE_ASSIGNMENT_BACKEND.Assignment"
     fi
 
     # Set the URL advertised in the ``versions`` structure returned by the '/' route
@@ -188,6 +236,10 @@ function configure_keystone() {
     cp $KEYSTONE_DIR/etc/logging.conf.sample $KEYSTONE_CONF_DIR/logging.conf
     iniset $KEYSTONE_CONF_DIR/logging.conf logger_root level "DEBUG"
     iniset $KEYSTONE_CONF_DIR/logging.conf logger_root handlers "devel,production"
+
+    if is_apache_enabled_service key; then
+        _config_keystone_apache_wsgi
+    fi
 }
 
 # create_keystone_accounts() - Sets up common required keystone accounts
@@ -217,9 +269,9 @@ create_keystone_accounts() {
         --name admin \
         | grep " id " | get_field 2)
     keystone user-role-add \
-        --user_id $ADMIN_USER \
-        --role_id $ADMIN_ROLE \
-        --tenant_id $ADMIN_TENANT
+        --user-id $ADMIN_USER \
+        --role-id $ADMIN_ROLE \
+        --tenant-id $ADMIN_TENANT
 
     # service
     SERVICE_TENANT=$(keystone tenant-create \
@@ -244,10 +296,10 @@ create_keystone_accounts() {
         --pass "$ADMIN_PASSWORD" \
         --email demo@example.com \
         | grep " id " | get_field 2)
-    keystone user-role-add --user_id $DEMO_USER --role_id $MEMBER_ROLE --tenant_id $DEMO_TENANT
-    keystone user-role-add --user_id $ADMIN_USER --role_id $ADMIN_ROLE --tenant_id $DEMO_TENANT
-    keystone user-role-add --user_id $DEMO_USER --role_id $ANOTHER_ROLE --tenant_id $DEMO_TENANT
-    keystone user-role-add --user_id $DEMO_USER --role_id $MEMBER_ROLE --tenant_id $INVIS_TENANT
+    keystone user-role-add --user-id $DEMO_USER --role-id $MEMBER_ROLE --tenant-id $DEMO_TENANT
+    keystone user-role-add --user-id $ADMIN_USER --role-id $ADMIN_ROLE --tenant-id $DEMO_TENANT
+    keystone user-role-add --user-id $DEMO_USER --role-id $ANOTHER_ROLE --tenant-id $DEMO_TENANT
+    keystone user-role-add --user-id $DEMO_USER --role-id $MEMBER_ROLE --tenant-id $INVIS_TENANT
 
     # Keystone
     if [[ "$KEYSTONE_CATALOG_BACKEND" = 'sql' ]]; then
@@ -289,6 +341,7 @@ function init_keystone() {
 function install_keystoneclient() {
     git_clone $KEYSTONECLIENT_REPO $KEYSTONECLIENT_DIR $KEYSTONECLIENT_BRANCH
     setup_develop $KEYSTONECLIENT_DIR
+    sudo install -D -m 0644 -o $STACK_USER {$KEYSTONECLIENT_DIR/tools/,/etc/bash_completion.d/}keystone.bash_completion
 }
 
 # install_keystone() - Collect source and prepare
@@ -299,6 +352,9 @@ function install_keystone() {
     fi
     git_clone $KEYSTONE_REPO $KEYSTONE_DIR $KEYSTONE_BRANCH
     setup_develop $KEYSTONE_DIR
+    if is_apache_enabled_service key; then
+        install_apache_wsgi
+    fi
 }
 
 # start_keystone() - Start running processes, including screen
@@ -309,11 +365,17 @@ function start_keystone() {
         service_port=$KEYSTONE_SERVICE_PORT_INT
     fi
 
-    # Start Keystone in a screen window
-    screen_it key "cd $KEYSTONE_DIR && $KEYSTONE_DIR/bin/keystone-all --config-file $KEYSTONE_CONF $KEYSTONE_LOG_CONFIG -d --debug"
+    if is_apache_enabled_service key; then
+        restart_apache_server
+        screen_it key "cd $KEYSTONE_DIR && sudo tail -f /var/log/$APACHE_NAME/keystone"
+    else
+        # Start Keystone in a screen window
+        screen_it key "cd $KEYSTONE_DIR && $KEYSTONE_DIR/bin/keystone-all --config-file $KEYSTONE_CONF $KEYSTONE_LOG_CONFIG -d --debug"
+    fi
+
     echo "Waiting for keystone to start..."
-    if ! timeout $SERVICE_TIMEOUT sh -c "while ! http_proxy= curl -s http://$SERVICE_HOST:$service_port/v$IDENTITY_API_VERSION/ >/dev/null; do sleep 1; done"; then
-      die $LINENO "keystone did not start"
+    if ! timeout $SERVICE_TIMEOUT sh -c "while ! curl --noproxy '*' -s http://$SERVICE_HOST:$service_port/v$IDENTITY_API_VERSION/ >/dev/null; do sleep 1; done"; then
+        die $LINENO "keystone did not start"
     fi
 
     # Start proxies if enabled
@@ -333,6 +395,7 @@ function stop_keystone() {
 # Restore xtrace
 $XTRACE
 
-# Local variables:
-# mode: shell-script
-# End:
+# Tell emacs to use shell-script-mode
+## Local variables:
+## mode: shell-script
+## End:

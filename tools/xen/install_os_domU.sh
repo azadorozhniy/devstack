@@ -10,6 +10,8 @@ set -o errexit
 set -o nounset
 set -o xtrace
 
+export LC_ALL=C
+
 # Abort if localrc is not set
 if [ ! -e ../../localrc ]; then
     echo "You must have a localrc with ALL necessary passwords defined before proceeding."
@@ -29,6 +31,10 @@ THIS_DIR=$(cd $(dirname "$0") && pwd)
 # xapi functions
 . $THIS_DIR/functions
 
+# Determine what system we are running on.
+# Might not be XenServer if we're using xenserver-core
+GetDistro
+
 #
 # Get Settings
 #
@@ -38,9 +44,9 @@ source $THIS_DIR/xenrc
 
 xe_min()
 {
-  local cmd="$1"
-  shift
-  xe "$cmd" --minimal "$@"
+    local cmd="$1"
+    shift
+    xe "$cmd" --minimal "$@"
 }
 
 #
@@ -90,6 +96,10 @@ create_directory_for_images
 #
 # Configure Networking
 #
+
+MGT_NETWORK=`xe pif-list management=true params=network-uuid minimal=true`
+MGT_BRIDGE_OR_NET_NAME=`xe network-list uuid=$MGT_NETWORK params=bridge minimal=true`
+
 setup_network "$VM_BRIDGE_OR_NET_NAME"
 setup_network "$MGT_BRIDGE_OR_NET_NAME"
 setup_network "$PUB_BRIDGE_OR_NET_NAME"
@@ -122,8 +132,8 @@ HOST_IP=$(xenapi_ip_on "$MGT_BRIDGE_OR_NET_NAME")
 # Set up ip forwarding, but skip on xcp-xapi
 if [ -a /etc/sysconfig/network ]; then
     if ! grep -q "FORWARD_IPV4=YES" /etc/sysconfig/network; then
-      # FIXME: This doesn't work on reboot!
-      echo "FORWARD_IPV4=YES" >> /etc/sysconfig/network
+        # FIXME: This doesn't work on reboot!
+        echo "FORWARD_IPV4=YES" >> /etc/sysconfig/network
     fi
 fi
 # Also, enable ip forwarding in rc.local, since the above trick isn't working
@@ -167,8 +177,8 @@ fi
 #
 
 GUEST_NAME=${GUEST_NAME:-"DevStackOSDomU"}
-TNAME="devstack_template"
-SNAME_PREPARED="template_prepared"
+TNAME="jeos_template_for_devstack"
+SNAME_TEMPLATE="jeos_snapshot_for_devstack"
 SNAME_FIRST_BOOT="before_first_boot"
 
 function wait_for_VM_to_halt() {
@@ -177,7 +187,7 @@ function wait_for_VM_to_halt() {
     mgmt_ip=$(echo $XENAPI_CONNECTION_URL | tr -d -c '1234567890.')
     domid=$(xe vm-list name-label="$GUEST_NAME" params=dom-id minimal=true)
     port=$(xenstore-read /local/domain/$domid/console/vnc-port)
-    echo "vncviewer -via $mgmt_ip localhost:${port:2}"
+    echo "vncviewer -via root@$mgmt_ip localhost:${port:2}"
     while true
     do
         state=$(xe_min vm-list name-label="$GUEST_NAME" power-state=halted)
@@ -197,6 +207,7 @@ if [ -z "$templateuuid" ]; then
     #
     # Install Ubuntu over network
     #
+    UBUNTU_INST_BRIDGE_OR_NET_NAME=${UBUNTU_INST_BRIDGE_OR_NET_NAME:-"$MGT_BRIDGE_OR_NET_NAME"}
 
     # always update the preseed file, incase we have a newer one
     PRESEED_URL=${PRESEED_URL:-""}
@@ -224,8 +235,11 @@ if [ -z "$templateuuid" ]; then
     $THIS_DIR/scripts/install-os-vpx.sh \
         -t "$UBUNTU_INST_TEMPLATE_NAME" \
         -n "$UBUNTU_INST_BRIDGE_OR_NET_NAME" \
-        -l "$GUEST_NAME" \
-        -r "$OSDOMU_MEM_MB"
+        -l "$GUEST_NAME"
+
+    set_vm_memory "$GUEST_NAME" "$OSDOMU_MEM_MB"
+
+    xe vm-start vm="$GUEST_NAME"
 
     # wait for install to finish
     wait_for_VM_to_halt
@@ -234,21 +248,8 @@ if [ -z "$templateuuid" ]; then
     vm_uuid=$(xe_min vm-list name-label="$GUEST_NAME")
     xe vm-param-set actions-after-reboot=Restart uuid="$vm_uuid"
 
-    #
-    # Prepare VM for DevStack
-    #
-
-    # Install XenServer tools, and other such things
-    $THIS_DIR/prepare_guest_template.sh "$GUEST_NAME"
-
-    # start the VM to run the prepare steps
-    xe vm-start vm="$GUEST_NAME"
-
-    # Wait for prep script to finish and shutdown system
-    wait_for_VM_to_halt
-
     # Make template from VM
-    snuuid=$(xe vm-snapshot vm="$GUEST_NAME" new-name-label="$SNAME_PREPARED")
+    snuuid=$(xe vm-snapshot vm="$GUEST_NAME" new-name-label="$SNAME_TEMPLATE")
     xe snapshot-clone uuid=$snuuid new-name-label="$TNAME"
 else
     #
@@ -256,6 +257,31 @@ else
     #
     vm_uuid=$(xe vm-install template="$TNAME" new-name-label="$GUEST_NAME")
 fi
+
+#
+# Prepare VM for DevStack
+#
+
+# Install XenServer tools, and other such things
+$THIS_DIR/prepare_guest_template.sh "$GUEST_NAME"
+
+# Set virtual machine parameters
+set_vm_memory "$GUEST_NAME" "$OSDOMU_MEM_MB"
+
+# Max out VCPU count for better performance
+max_vcpus "$GUEST_NAME"
+
+# Wipe out all network cards
+destroy_all_vifs_of "$GUEST_NAME"
+
+# Add only one interface to prepare the guest template
+add_interface "$GUEST_NAME" "$MGT_BRIDGE_OR_NET_NAME" "0"
+
+# start the VM to run the prepare steps
+xe vm-start vm="$GUEST_NAME"
+
+# Wait for prep script to finish and shutdown system
+wait_for_VM_to_halt
 
 ## Setup network cards
 # Wipe out all
